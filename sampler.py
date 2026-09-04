@@ -404,6 +404,7 @@ def sample_crypto(fx):
     for sym in ("BTCINR", "ETHINR"):
         try:
             j = get_json(s, f"https://api.pi42.com/v1/market/depth/{sym}", timeout=12, retries=2)
+            j = j.get("data") or j
             bids = j.get("bids") or j.get("b") or []
             asks = j.get("asks") or j.get("a") or []
             if not bids or not asks:

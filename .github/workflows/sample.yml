@@ -1,0 +1,55 @@
+name: Sample order books
+
+on:
+  workflow_dispatch:        # manual "Run workflow" button for testing
+  schedule:
+    # GitHub cron is UTC. IST = UTC + 5:30.  NSE trades 09:15–15:30 IST = 03:45–10:00 UTC.
+    # Minute offsets avoid the top-of-hour queue where GitHub delays scheduled runs the most.
+    - cron: '48,58 3 * * 1-5'                 # 09:18, 09:28 IST
+    - cron: '3,13,23,33,43,53 4-9 * * 1-5'    # 09:33 … 15:23 IST, every 10 minutes
+    - cron: '3,13 10 * * 1-5'                 # 15:33, 15:43 IST  (closing book, post-close state)
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sampler
+  cancel-in-progress: false   # queue overlapping runs instead of killing them
+
+jobs:
+  sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependency
+        run: pip install --quiet requests
+
+      - name: Sample NSE and crypto order books
+        env:
+          COLLECTOR_NAME: github-actions
+        run: python sampler.py
+
+      - name: Commit the snapshot
+        run: |
+          git config user.name "sampler-bot"
+          git config user.email "sampler-bot@users.noreply.github.com"
+          git add data
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"; exit 0
+          fi
+          git commit -m "sample $(date -u +%Y-%m-%dT%H:%MZ)"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --quiet && git push && exit 0
+            echo "push failed, retry $i"; sleep 7
+          done
+          exit 1

@@ -4,10 +4,9 @@ on:
   workflow_dispatch:        # manual "Run workflow" button for testing
   schedule:
     # GitHub cron is UTC. IST = UTC + 5:30.  NSE trades 09:15–15:30 IST = 03:45–10:00 UTC.
-    # Minute offsets avoid the top-of-hour queue where GitHub delays scheduled runs the most.
-    - cron: '48,58 3 * * 1-5'                 # 09:18, 09:28 IST
-    - cron: '3,13,23,33,43,53 4-9 * * 1-5'    # 09:33 … 15:23 IST, every 10 minutes
-    - cron: '3,13 10 * * 1-5'                 # 15:33, 15:43 IST  (closing book, post-close state)
+    - cron: '46,51,56 3 * * 1-5'                                   # 09:16, 09:21, 09:26 IST
+    - cron: '1,6,11,16,21,26,31,36,41,46,51,56 4-9 * * 1-5'        # 09:31 … 15:26 IST, every 5 min
+    - cron: '1,6,11 10 * * 1-5'                                    # 15:31, 15:36, 15:41 IST (closing book)
 
 permissions:
   contents: write

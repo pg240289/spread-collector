@@ -1,24 +1,27 @@
 name: Sample order books
 
 on:
-  workflow_dispatch:        # manual "Run workflow" button for testing
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: 'How long to keep sampling (minutes). Use 5 for a quick test.'
+        default: '5'
   schedule:
-    # GitHub cron is UTC. IST = UTC + 5:30.  NSE trades 09:15–15:30 IST = 03:45–10:00 UTC.
-    - cron: '46,51,56 3 * * 1-5'                                   # 09:16, 09:21, 09:26 IST
-    - cron: '1,6,11,16,21,26,31,36,41,46,51,56 4-9 * * 1-5'        # 09:31 … 15:26 IST, every 5 min
-    - cron: '1,6,11 10 * * 1-5'                                    # 15:31, 15:36, 15:41 IST (closing book)
+    # GitHub cron is UTC. IST = UTC + 5:30.
+    # GitHub's scheduler drops or delays events unpredictably, so coverage is built on redundancy:
+    #  - an anchor run at 09:10 IST that samples every 5 minutes for ~5h50m (09:10–15:00), and
+    #  - hourly backup runs (10:10 … 15:10 IST) of ~62 minutes each; the 15:10 run covers the close.
+    # Duplicate samples for the same 5-minute slot are de-duplicated in analysis.
+    - cron: '40 3 * * 1-5'
+    - cron: '40 4-9 * * 1-5'
 
 permissions:
   contents: write
 
-concurrency:
-  group: sampler
-  cancel-in-progress: false   # queue overlapping runs instead of killing them
-
 jobs:
   sample:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 358
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -33,22 +36,35 @@ jobs:
       - name: Install dependency
         run: pip install --quiet requests
 
-      - name: Sample NSE and crypto order books
+      - name: Sample every 5 minutes and commit each snapshot
         env:
           COLLECTOR_NAME: github-actions
-        run: python sampler.py
-
-      - name: Commit the snapshot
+          INPUT_MINUTES: ${{ github.event.inputs.minutes }}
         run: |
           git config user.name "sampler-bot"
           git config user.email "sampler-bot@users.noreply.github.com"
-          git add data
-          if git diff --cached --quiet; then
-            echo "Nothing to commit"; exit 0
+          if [ -n "$INPUT_MINUTES" ]; then
+            DURATION_MIN="$INPUT_MINUTES"
+          elif [ "$(date -u +%H)" = "03" ]; then
+            DURATION_MIN=350
+          else
+            DURATION_MIN=62
           fi
-          git commit -m "sample $(date -u +%Y-%m-%dT%H:%MZ)"
-          for i in 1 2 3 4 5; do
-            git pull --rebase --quiet && git push && exit 0
-            echo "push failed, retry $i"; sleep 7
+          echo "Sampling for $DURATION_MIN minutes (started $(date -u +%H:%M:%SZ))"
+          start=$(date +%s)
+          end=$((start + DURATION_MIN * 60))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            python sampler.py || echo "sampler failed at $(date -u +%H:%M:%SZ)"
+            git add data
+            if ! git diff --cached --quiet; then
+              git commit -q -m "sample $(date -u +%Y-%m-%dT%H:%MZ)"
+              for i in 1 2 3 4 5; do
+                git pull --rebase -q && git push -q && break
+                echo "push failed, retry $i"; sleep 5
+              done
+            fi
+            now=$(date +%s)
+            next=$(( (now / 300 + 1) * 300 ))
+            if [ "$next" -ge "$end" ]; then break; fi
+            sleep $((next - now))
           done
-          exit 1

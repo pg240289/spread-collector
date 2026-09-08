@@ -1,59 +1,68 @@
 name: Sample order books
 
+# Design (v4): GitHub's cron scheduler dropped most events on 7–8 Sep 2026, so this workflow no longer
+# depends on it. Each run samples for ~5h40m and then dispatches its own successor (workflow_dispatch
+# works with the built-in GITHUB_TOKEN), forming a chain that runs around the clock until a file named
+# STOP exists in the repo root or the workflow is disabled. The cron entries below are only restarters
+# in case the chain breaks; a starting run exits at once if another run is already active.
+# Sampling interval: every 5 minutes 08:55–15:50 IST on weekdays, every 15 minutes otherwise.
+
 on:
   workflow_dispatch:
-    inputs:
-      minutes:
-        description: 'How long to keep sampling (minutes). Use 5 for a quick test.'
-        default: '5'
   schedule:
-    # GitHub cron is UTC. IST = UTC + 5:30.
-    # GitHub's scheduler drops or delays events unpredictably, so coverage is built on redundancy:
-    #  - an anchor run at 09:10 IST that samples every 5 minutes for ~5h50m (09:10–15:00), and
-    #  - hourly backup runs (10:10 … 15:10 IST) of ~62 minutes each; the 15:10 run covers the close.
-    # Duplicate samples for the same 5-minute slot are de-duplicated in analysis.
-    - cron: '40 3 * * 1-5'
-    - cron: '40 4-9 * * 1-5'
+    - cron: '40 3 * * 1-5'      # 09:10 IST restarter
+    - cron: '40 6 * * 1-5'      # 12:10 IST restarter
+    - cron: '40 9 * * 1-5'      # 15:10 IST restarter
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   sample:
     runs-on: ubuntu-latest
-    timeout-minutes: 358
+    timeout-minutes: 355
+    env:
+      GH_TOKEN: ${{ github.token }}
+      COLLECTOR_NAME: github-actions
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
 
+      - name: Exit if another run is already active (keeps a single chain)
+        run: |
+          for i in 1 2 3 4; do
+            n=$(gh run list --workflow sample.yml --status in_progress --json databaseId --jq 'length')
+            echo "runs in progress (including this one): $n"
+            [ "$n" -le 1 ] && exit 0
+            sleep 45
+          done
+          echo "Another run is active — this one steps aside."
+          echo "SKIP=1" >> "$GITHUB_ENV"
+
       - name: Set up Python
+        if: env.SKIP != '1'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependency
+        if: env.SKIP != '1'
         run: pip install --quiet requests
 
-      - name: Sample every 5 minutes and commit each snapshot
-        env:
-          COLLECTOR_NAME: github-actions
-          INPUT_MINUTES: ${{ github.event.inputs.minutes }}
+      - name: Sample and commit each snapshot
+        if: env.SKIP != '1'
         run: |
           git config user.name "sampler-bot"
           git config user.email "sampler-bot@users.noreply.github.com"
-          if [ -n "$INPUT_MINUTES" ]; then
-            DURATION_MIN="$INPUT_MINUTES"
-          elif [ "$(date -u +%H)" = "03" ]; then
-            DURATION_MIN=350
-          else
-            DURATION_MIN=62
-          fi
-          echo "Sampling for $DURATION_MIN minutes (started $(date -u +%H:%M:%SZ))"
+          DURATION_MIN=340
           start=$(date +%s)
           end=$((start + DURATION_MIN * 60))
+          echo "Sampling until $(date -u -d @$end +%H:%M:%SZ)"
           while [ "$(date +%s)" -lt "$end" ]; do
+            if [ -f STOP ]; then echo "STOP file present — ending."; break; fi
             python sampler.py || echo "sampler failed at $(date -u +%H:%M:%SZ)"
             git add data
             if ! git diff --cached --quiet; then
@@ -63,8 +72,18 @@ jobs:
                 echo "push failed, retry $i"; sleep 5
               done
             fi
+            hm=$((10#$(TZ=Asia/Kolkata date +%H%M)))
+            dow=$(TZ=Asia/Kolkata date +%u)
+            if [ "$dow" -le 5 ] && [ "$hm" -ge 855 ] && [ "$hm" -le 1550 ]; then step=300; else step=900; fi
             now=$(date +%s)
-            next=$(( (now / 300 + 1) * 300 ))
+            next=$(( (now / step + 1) * step ))
             if [ "$next" -ge "$end" ]; then break; fi
             sleep $((next - now))
           done
+
+      - name: Dispatch the successor run
+        if: env.SKIP != '1'
+        run: |
+          git pull -q || true
+          if [ -f STOP ]; then echo "STOP file present — chain ends here."; exit 0; fi
+          gh workflow run sample.yml --ref "${GITHUB_REF_NAME}" && echo "Successor dispatched."
